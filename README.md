@@ -35,13 +35,7 @@ scripts/add_pgo_key.sh
 ## Run
 
 ```sh
-pgo PROJECT_NAME
-```
-
-Config lives at:
-
-```text
-~/.config/pgo/projects.conf
+pgo PROJECT_NICKNAME
 ```
 
 ## Skills
@@ -60,7 +54,7 @@ If `.pgo/skills` exists, pgo loads it on every run. No Docker rebuild needed.
 Disable project skills for one run:
 
 ```sh
-pgo PROJECT_NAME --no-project-skills
+pgo PROJECT_NICKNAME --no-project-skills
 ```
 
 Global Pi skill discovery stays disabled.

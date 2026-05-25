@@ -4,12 +4,12 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  pgo PROJECT [runner options] [-- pi args...]
+  pgo PROJECT_NICKNAME [runner options] [-- pi args...]
   pgo /path/to/repo [runner options] [-- pi args...]
   pgo config
   pgo --list
 
-Launch Dockerized Pi for a named project.
+Launch Dockerized Pi for a project nickname.
 
 Config:
   $PGO_CONFIG, or ~/.config/pgo/projects.conf
@@ -25,9 +25,9 @@ Setup:
   from the pgo clone.
 
 Examples:
-  pgo PROJECT_NAME
+  pgo PROJECT_NICKNAME
   pgo /path/to/repo
-  PGO_CONFIG=/path/to/projects.conf pgo PROJECT_NAME
+  PGO_CONFIG=/path/to/projects.conf pgo PROJECT_NICKNAME
 EOF
 }
 

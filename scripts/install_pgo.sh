@@ -231,7 +231,7 @@ Setup scripts:
       then store the provider API key in macOS Keychain.
       Re-running it replaces the existing default provider settings.
   $project_script
-      Add or update a named workspace.
+      Add or update a project nickname and workspace path.
   $key_script
       Rotate the stored API key later.
 
@@ -241,7 +241,7 @@ Next steps:
        $build_path
   3. Add the required provider/model config and API key:
        $provider_script
-  4. Add a named workspace:
+  4. Add a project nickname:
        $project_script
 EOF
 
@@ -249,7 +249,7 @@ case ":$PATH:" in
   *":$bin_dir:"*)
     cat <<EOF
   5. Start interactive mode:
-       pgo PROJECT_NAME
+       pgo PROJECT_NICKNAME
 EOF
     ;;
   *)
@@ -258,7 +258,7 @@ EOF
      The installer updates ~/.zshrc, but it cannot reload the parent shell for you:
        source "\$HOME/.zshrc"
   6. Start interactive mode:
-       pgo PROJECT_NAME
+       pgo PROJECT_NICKNAME
 EOF
     ;;
 esac

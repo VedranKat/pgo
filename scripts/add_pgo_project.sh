@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/add_pgo_project.sh [options]
 
-Add or update a named workspace in the pgo project config.
+Add or update a project nickname in the pgo project config.
 
 Options:
   --config PATH   Config path (default: $HOME/.config/pgo/projects.conf, or PGO_CONFIG)

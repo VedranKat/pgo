@@ -2,7 +2,7 @@
 
 `pgo` is a small terminal launcher for Dockerized Pi.
 
-It lets each user keep local project names and model settings outside this repo, while storing API keys in macOS Keychain.
+It lets each user keep local project nicknames and model settings outside this repo, while storing API keys in macOS Keychain.
 
 ## Install Locally
 
@@ -81,7 +81,7 @@ By default, pgo uses the Keychain label `pgo_ak` for the API key. The provider h
 
 ## Add Projects
 
-Add or update a named workspace:
+Add or update a project nickname:
 
 ```sh
 scripts/add_pgo_project.sh
@@ -115,7 +115,7 @@ pgo --list
 Launch Pi for a named project:
 
 ```sh
-pgo PROJECT_NAME
+pgo PROJECT_NICKNAME
 ```
 
 Launch Pi for a direct path:
@@ -127,11 +127,11 @@ pgo /path/to/repo
 Pass runner options after the project:
 
 ```sh
-pgo PROJECT_NAME --no-project-skills
+pgo PROJECT_NICKNAME --no-project-skills
 ```
 
 Pass Pi args after `--`:
 
 ```sh
-pgo PROJECT_NAME -- -p "Summarize this project"
+pgo PROJECT_NICKNAME -- -p "Summarize this project"
 ```
