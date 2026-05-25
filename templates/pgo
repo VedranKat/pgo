@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pgo PROJECT [runner options] [-- pi args...]
+  pgo /path/to/repo [runner options] [-- pi args...]
+  pgo --list
+
+Launch Dockerized Pi for a named project.
+
+Config:
+  $PGO_CONFIG, or ~/.config/pgo/projects.conf
+
+Keychain default:
+  service: pgo_ak
+  account: pgo_ak
+  env var: pgo_ak
+
+Setup:
+  Run scripts/install_pgo.sh, scripts/build_pi_docker.sh,
+  scripts/add_pgo_provider.sh, then scripts/add_pgo_project.sh
+  from the pgo clone.
+
+Examples:
+  pgo PROJECT_NAME
+  pgo /path/to/repo
+  PGO_CONFIG=/path/to/projects.conf pgo PROJECT_NAME
+EOF
+}
+
+die() {
+  echo "pgo: $*" >&2
+  exit 1
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+expand_home() {
+  local value="$1"
+  case "$value" in
+    "~")
+      printf '%s' "$HOME"
+      ;;
+    "~/"*)
+      printf '%s/%s' "$HOME" "${value#"~/"}"
+      ;;
+    "\$HOME")
+      printf '%s' "$HOME"
+      ;;
+    "\$HOME/"*)
+      printf '%s/%s' "$HOME" "${value#"\$HOME/"}"
+      ;;
+    *)
+      printf '%s' "$value"
+      ;;
+  esac
+}
+
+config_value() {
+  local wanted_key="$1"
+  local line key value
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+
+    if [[ "$key" == "$wanted_key" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done < "$config_path"
+
+  return 1
+}
+
+list_projects() {
+  local line key value name
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+
+    case "$key" in
+      project.*)
+        name="${key#project.}"
+        printf '%-24s %s\n' "$name" "$(expand_home "$value")"
+        ;;
+    esac
+  done < "$config_path"
+}
+
+read_required_config() {
+  local key="$1"
+  local value
+  value="$(config_value "$key" || true)"
+  [[ -n "$value" ]] || die "missing '$key' in $config_path"
+  printf '%s' "$value"
+}
+
+config_path="${PGO_CONFIG:-$HOME/.config/pgo/projects.conf}"
+config_path="$(expand_home "$config_path")"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+[[ -f "$config_path" ]] || die "config not found: $config_path"
+
+if [[ "${1:-}" == "--list" ]]; then
+  list_projects
+  exit 0
+fi
+
+project="${1:-}"
+[[ -n "$project" ]] || {
+  usage >&2
+  exit 64
+}
+shift
+
+runner_args=()
+pi_args=()
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--" ]]; then
+    shift
+    pi_args=("$@")
+    break
+  fi
+  runner_args+=("$1")
+  shift
+done
+
+runner="$(expand_home "$(read_required_config runner)")"
+base_url="$(config_value "base_url.$project" || true)"
+base_url="${base_url:-$(config_value base_url || true)}"
+model="$(config_value "model.$project" || true)"
+model="${model:-$(config_value model || true)}"
+keychain_service="$(config_value "keychain_service.$project" || true)"
+keychain_service="${keychain_service:-$(config_value keychain_service || true)}"
+keychain_service="${keychain_service:-pgo_ak}"
+keychain_account="$(config_value "keychain_account.$project" || true)"
+keychain_account="${keychain_account:-$(config_value keychain_account || true)}"
+keychain_account="${keychain_account:-pgo_ak}"
+api_key_env="$(config_value "api_key_env.$project" || true)"
+api_key_env="${api_key_env:-$(config_value api_key_env || true)}"
+api_key_env="${api_key_env:-pgo_ak}"
+
+workspace_candidate="$(expand_home "$project")"
+if [[ "$project" == /* || "$project" == "." || "$project" == ".." || "$project" == ./* || "$project" == ../* || "$project" == "~/"* || "$project" == "\$HOME/"* || -d "$workspace_candidate" ]]; then
+  workspace="$workspace_candidate"
+else
+  workspace="$(config_value "project.$project" || true)"
+  workspace="$(expand_home "$workspace")"
+fi
+
+[[ -n "$base_url" ]] || die "missing base_url or base_url.$project in $config_path"
+[[ -n "$model" ]] || die "missing model or model.$project in $config_path"
+[[ -n "$workspace" ]] || die "unknown project '$project'. Run: pgo --list"
+[[ -d "$workspace" ]] || die "workspace does not exist: $workspace"
+[[ -x "$runner" ]] || die "runner is not executable: $runner"
+
+if [[ ! "$api_key_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  die "api_key_env must be a valid shell variable name: $api_key_env"
+fi
+
+command -v security >/dev/null 2>&1 || die "macOS security command not found"
+
+api_key="$(
+  security find-generic-password \
+    -a "$keychain_account" \
+    -s "$keychain_service" \
+    -w
+)" || die "Keychain item not found for service '$keychain_service' and account '$keychain_account'. Store it with the hidden-prompt command shown by: pgo --help"
+
+export "$api_key_env=$api_key"
+
+pi_separator=()
+if [[ "${#pi_args[@]}" -gt 0 ]]; then
+  pi_separator=(--)
+fi
+
+PI_OPENAI_BASE_URL="$base_url" \
+PI_OPENAI_MODEL="$model" \
+"$runner" \
+  --api-key-env "$api_key_env" \
+  "${runner_args[@]}" \
+  "$workspace" \
+  "${pi_separator[@]}" \
+  "${pi_args[@]}"

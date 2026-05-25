@@ -1,0 +1,17 @@
+.git
+.codex
+.DS_Store
+**/.DS_Store
+.pi
+examples
+tests
+scripts
+docs
+templates
+README.md
+AGENTS.md
+
+!docker/pi/Dockerfile
+!docker/pi/entrypoint.sh
+!docker/pi/extensions/
+!docker/pi/extensions/read-only-git.ts

@@ -1,0 +1,30 @@
+# Copy this file to:
+#   ~/.config/pgo/projects.conf
+#
+# This file stores paths and model choices only. Do not put API keys here.
+
+runner = $HOME/Projects/pgo/scripts/run_pi_docker.sh
+
+# Add a provider before running pgo:
+#   scripts/add_pgo_provider.sh
+#
+# Example provider fields:
+# base_url = https://your-provider.example/v1
+# model = your-model-id
+#
+# The Keychain item should contain a key for the configured base_url.
+keychain_service = pgo_ak
+keychain_account = pgo_ak
+api_key_env = pgo_ak
+
+# Named projects are added with:
+#   scripts/add_pgo_project.sh
+#
+# Example:
+# project.work-app = $HOME/Projects/work-app
+
+# Optional per-project overrides.
+# model.work-app = company-model-id
+# base_url.work-app = https://your-provider.example/v1
+# keychain_service.work-app = pgo_work_ak
+# keychain_account.work-app = pgo_work_ak

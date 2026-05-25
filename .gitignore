@@ -1,0 +1,21 @@
+.DS_Store
+**/.DS_Store
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+.netrc
+.npmrc
+.pypirc
+projects.conf
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Local runtime/dependency state
+.pi/
+node_modules/
