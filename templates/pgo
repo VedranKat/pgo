@@ -6,6 +6,7 @@ usage() {
 Usage:
   pgo PROJECT [runner options] [-- pi args...]
   pgo /path/to/repo [runner options] [-- pi args...]
+  pgo config
   pgo --list
 
 Launch Dockerized Pi for a named project.
@@ -104,6 +105,96 @@ list_projects() {
   done < "$config_path"
 }
 
+print_value() {
+  local label="$1"
+  local value="$2"
+
+  if [[ -n "$value" ]]; then
+    printf '  %s: %s\n' "$label" "$value"
+  else
+    printf '  %s: missing\n' "$label"
+  fi
+}
+
+keychain_status() {
+  local service="$1"
+  local account="$2"
+
+  if ! command -v security >/dev/null 2>&1; then
+    printf 'unavailable'
+    return 0
+  fi
+
+  if security find-generic-password -a "$account" -s "$service" >/dev/null 2>&1; then
+    printf 'found'
+  else
+    printf 'missing'
+  fi
+}
+
+print_config() {
+  local runner expanded_runner runner_status
+  local base_url model keychain_service keychain_account api_key_env
+  local line key value name project_count
+
+  runner="$(config_value runner || true)"
+  expanded_runner="$(expand_home "$runner")"
+  if [[ -z "$runner" ]]; then
+    runner_status="missing"
+  elif [[ -x "$expanded_runner" ]]; then
+    runner_status="ok"
+  elif [[ -e "$expanded_runner" ]]; then
+    runner_status="not executable"
+  else
+    runner_status="missing"
+  fi
+
+  base_url="$(config_value base_url || true)"
+  model="$(config_value model || true)"
+  keychain_service="$(config_value keychain_service || true)"
+  keychain_service="${keychain_service:-pgo_ak}"
+  keychain_account="$(config_value keychain_account || true)"
+  keychain_account="${keychain_account:-pgo_ak}"
+  api_key_env="$(config_value api_key_env || true)"
+  api_key_env="${api_key_env:-pgo_ak}"
+
+  printf 'config: %s\n' "$config_path"
+  if [[ -n "$runner" ]]; then
+    printf 'runner: %s (%s)\n' "$expanded_runner" "$runner_status"
+  else
+    printf 'runner: missing\n'
+  fi
+
+  printf '\nprovider:\n'
+  print_value "base_url" "$base_url"
+  print_value "model" "$model"
+  print_value "api_key_env" "$api_key_env"
+  printf '  keychain: %s/%s\n' "$keychain_service" "$keychain_account"
+  printf '  keychain item: %s\n' "$(keychain_status "$keychain_service" "$keychain_account")"
+
+  printf '\nprojects:\n'
+  project_count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+
+    case "$key" in
+      project.*)
+        name="${key#project.}"
+        project_count=$((project_count + 1))
+        printf '  %-20s %s\n' "$name" "$(expand_home "$value")"
+        ;;
+    esac
+  done < "$config_path"
+  if [[ "$project_count" -eq 0 ]]; then
+    printf '  none\n'
+  fi
+}
+
 read_required_config() {
   local key="$1"
   local value
@@ -127,6 +218,11 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "config" ]]; then
+  print_config
+  exit 0
+fi
+
 project="${1:-}"
 [[ -n "$project" ]] || {
   usage >&2
@@ -147,18 +243,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 runner="$(expand_home "$(read_required_config runner)")"
-base_url="$(config_value "base_url.$project" || true)"
-base_url="${base_url:-$(config_value base_url || true)}"
-model="$(config_value "model.$project" || true)"
-model="${model:-$(config_value model || true)}"
-keychain_service="$(config_value "keychain_service.$project" || true)"
-keychain_service="${keychain_service:-$(config_value keychain_service || true)}"
+base_url="$(config_value base_url || true)"
+model="$(config_value model || true)"
+keychain_service="$(config_value keychain_service || true)"
 keychain_service="${keychain_service:-pgo_ak}"
-keychain_account="$(config_value "keychain_account.$project" || true)"
-keychain_account="${keychain_account:-$(config_value keychain_account || true)}"
+keychain_account="$(config_value keychain_account || true)"
 keychain_account="${keychain_account:-pgo_ak}"
-api_key_env="$(config_value "api_key_env.$project" || true)"
-api_key_env="${api_key_env:-$(config_value api_key_env || true)}"
+api_key_env="$(config_value api_key_env || true)"
 api_key_env="${api_key_env:-pgo_ak}"
 
 workspace_candidate="$(expand_home "$project")"
@@ -169,8 +260,8 @@ else
   workspace="$(expand_home "$workspace")"
 fi
 
-[[ -n "$base_url" ]] || die "missing base_url or base_url.$project in $config_path"
-[[ -n "$model" ]] || die "missing model or model.$project in $config_path"
+[[ -n "$base_url" ]] || die "missing base_url in $config_path"
+[[ -n "$model" ]] || die "missing model in $config_path"
 [[ -n "$workspace" ]] || die "unknown project '$project'. Run: pgo --list"
 [[ -d "$workspace" ]] || die "workspace does not exist: $workspace"
 [[ -x "$runner" ]] || die "runner is not executable: $runner"

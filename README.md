@@ -70,3 +70,11 @@ Global Pi skill discovery stays disabled.
 - Pi is not installed or run on the host Mac.
 - Workspace writes are blocked unless `--write` is passed.
 - Shell is not available to Pi by default.
+
+## Config
+
+```sh
+pgo config
+```
+
+Shows the config path, runner, provider/model, Keychain item status, and projects. It never prints the API key.

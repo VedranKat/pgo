@@ -163,12 +163,6 @@ api_key_env = pgo_ak
 
 # Named projects are added with:
 #   scripts/add_pgo_project.sh
-
-# Optional per-project overrides.
-# model.work-app = company-model-id
-# base_url.work-app = https://your-provider.example/v1
-# keychain_service.work-app = pgo_work_ak
-# keychain_account.work-app = pgo_work_ak
 EOF
   config_status="wrote config"
 fi

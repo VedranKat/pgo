@@ -22,9 +22,3 @@ api_key_env = pgo_ak
 #
 # Example:
 # project.work-app = $HOME/Projects/work-app
-
-# Optional per-project overrides.
-# model.work-app = company-model-id
-# base_url.work-app = https://your-provider.example/v1
-# keychain_service.work-app = pgo_work_ak
-# keychain_account.work-app = pgo_work_ak
