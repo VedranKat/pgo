@@ -12,25 +12,32 @@ type GitOperation =
   | "diff_summary"
   | "diff_dirstat"
   | "log"
+  | "rev_list"
   | "show"
   | "branch"
+  | "refs"
+  | "grep"
   | "rev_parse"
   | "merge_base"
   | "ls_files"
+  | "ls_tree"
   | "root";
 
 type ComparisonMode = "merge-base" | "direct";
+type GrepMode = "fixed" | "regex";
 
 type ReadOnlyGitParams = {
   operation: GitOperation;
   base?: string;
   ref?: string;
   path?: string;
+  pattern?: string;
   limit?: number;
   offset?: number;
   maxChars?: number;
   comparison?: ComparisonMode;
   diffFilter?: string;
+  grepMode?: GrepMode;
 };
 
 type ToolResult = {
@@ -65,11 +72,15 @@ const OPERATIONS: GitOperation[] = [
   "diff_summary",
   "diff_dirstat",
   "log",
+  "rev_list",
   "show",
   "branch",
+  "refs",
+  "grep",
   "rev_parse",
   "merge_base",
   "ls_files",
+  "ls_tree",
   "root",
 ];
 
@@ -80,6 +91,7 @@ const MAX_PAGE_LIMIT = 1000;
 const MAX_OFFSET = 1_000_000;
 const DEFAULT_MAX_CHARS = 20000;
 const MAX_CHARS = 100000;
+const MAX_PATTERN_CHARS = 1000;
 const SAFE_REVISION = /^[A-Za-z0-9._/@+~^-]+$/;
 const SAFE_DIFF_FILTER = /^[ACDMRTUXB*]+$/;
 const BASE_GIT_ARGS = [
@@ -103,8 +115,12 @@ const LINE_PAGED_OPERATIONS = new Set<GitOperation>([
   "diff_summary",
   "diff_dirstat",
   "log",
+  "rev_list",
   "branch",
+  "refs",
+  "grep",
   "ls_files",
+  "ls_tree",
 ]);
 
 type BuiltGitCommand = {
@@ -116,6 +132,7 @@ type BuiltGitCommand = {
   offset: number;
   streamOffset: number;
   maxChars: number;
+  successStatuses: Set<number>;
 };
 
 function assertSafeRevision(name: string, value: string): string {
@@ -205,6 +222,26 @@ function optionalDiffFilter(value: string | undefined): string | undefined {
   return filter;
 }
 
+function requiredPattern(value: string | undefined): string {
+  if (value === undefined || value.length === 0 || value.includes("\0")) {
+    throw new Error("pattern is required for operation=grep and must not be empty");
+  }
+  if (value.length > MAX_PATTERN_CHARS) {
+    throw new Error(`pattern must be ${MAX_PATTERN_CHARS} characters or fewer`);
+  }
+  return value;
+}
+
+function optionalGrepMode(value: GrepMode | undefined): GrepMode {
+  if (value === undefined) {
+    return "fixed";
+  }
+  if (value !== "fixed" && value !== "regex") {
+    throw new Error('grepMode must be "fixed" or "regex"');
+  }
+  return value;
+}
+
 function diffFilterArgs(diffFilter: string | undefined): string[] {
   return diffFilter ? [`--diff-filter=${diffFilter}`] : [];
 }
@@ -227,7 +264,8 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
   }
 
   const base = optionalRevision("base", params.base);
-  const ref = optionalRevision("ref", params.ref) ?? "HEAD";
+  const explicitRef = optionalRevision("ref", params.ref);
+  const ref = explicitRef ?? "HEAD";
   const path = assertSafePath(params.path);
   const limit = boundedInt(
     "limit",
@@ -241,9 +279,10 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
   const diffFilter = optionalDiffFilter(params.diffFilter);
   const linePaged = LINE_PAGED_OPERATIONS.has(params.operation);
   const pageProbeLimit = linePaged ? limit + 1 : limit;
-  const streamOffset = params.operation === "log" ? 0 : offset;
+  const streamOffset = params.operation === "log" || params.operation === "rev_list" ? 0 : offset;
   const range = diffRangeArgs(base, ref, comparison);
   let gitArgs: string[];
+  let successStatuses = new Set([0]);
 
   switch (params.operation) {
     case "status":
@@ -328,6 +367,34 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
         path,
       );
       break;
+    case "rev_list":
+      gitArgs = withPath(
+        base
+          ? [
+              "rev-list",
+              "--topo-order",
+              "--date-order",
+              "--parents",
+              "--skip",
+              String(offset),
+              "--max-count",
+              String(pageProbeLimit),
+              `${base}..${ref}`,
+            ]
+          : [
+              "rev-list",
+              "--topo-order",
+              "--date-order",
+              "--parents",
+              "--skip",
+              String(offset),
+              "--max-count",
+              String(pageProbeLimit),
+              ref,
+            ],
+        path,
+      );
+      break;
     case "show":
       gitArgs = withPath(
         ["show", "--no-ext-diff", "--no-textconv", "--stat", "--oneline", "--decorate", ref],
@@ -337,6 +404,37 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
     case "branch":
       gitArgs = ["branch", "--all", "--no-color"];
       break;
+    case "refs":
+      gitArgs = [
+        "for-each-ref",
+        "--sort=-creatordate",
+        "--format=%(refname:short)%09%(objectname:short)%09%(objecttype)%09%(creatordate:short)%09%(contents:subject)",
+        "refs/heads",
+        "refs/tags",
+        "refs/remotes",
+      ];
+      break;
+    case "grep": {
+      const pattern = requiredPattern(params.pattern);
+      const grepMode = optionalGrepMode(params.grepMode);
+      gitArgs = withPath(
+        [
+          "grep",
+          "--line-number",
+          "--column",
+          "--full-name",
+          "-I",
+          "--no-color",
+          grepMode === "regex" ? "-E" : "-F",
+          "-e",
+          pattern,
+          ...(explicitRef ? [explicitRef] : []),
+        ],
+        path,
+      );
+      successStatuses = new Set([0, 1]);
+      break;
+    }
     case "rev_parse":
       gitArgs = ["rev-parse", "--short", ref];
       break;
@@ -348,6 +446,9 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
       break;
     case "ls_files":
       gitArgs = withPath(["ls-files"], path);
+      break;
+    case "ls_tree":
+      gitArgs = withPath(["ls-tree", "-r", "--full-tree", "--long", ref], path);
       break;
     case "root":
       gitArgs = ["rev-parse", "--show-toplevel"];
@@ -364,6 +465,7 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
     offset,
     streamOffset,
     maxChars,
+    successStatuses,
   };
 }
 
@@ -490,7 +592,7 @@ async function runGitText(command: BuiltGitCommand, signal?: AbortSignal): Promi
   if (result.timedOut) {
     throw new Error("git timed out after 15s");
   }
-  if (!truncatedByChars && result.status !== 0) {
+  if (!truncatedByChars && !command.successStatuses.has(result.status ?? -1)) {
     throw new Error(output.trim() || result.stderr.trim() || `git exited with status ${result.status}`);
   }
 
@@ -559,7 +661,7 @@ async function runGitLines(command: BuiltGitCommand, signal?: AbortSignal): Prom
   if (result.timedOut) {
     throw new Error("git timed out after 15s");
   }
-  if (!hasMore && result.status !== 0) {
+  if (!hasMore && !command.successStatuses.has(result.status ?? -1)) {
     throw new Error(result.stderr.trim() || `git exited with status ${result.status}`);
   }
 
@@ -613,6 +715,7 @@ export default function activate(pi: ExtensionAPI): void {
       "A git ref is a branch, tag, commit, or revision expression. Use HEAD for the current branch.",
       "For branch comparisons, pass base and ref separately, for example base=main and ref=HEAD. Do not pass main...HEAD as one value.",
       "For large comparisons, start with diff_shortstat, diff_dirstat, diff_name_status, or diff_numstat before requesting full diff output.",
+      "Use rev_list to page commit topology, refs to list local refs, ls_tree to inspect tracked tree contents at a ref, and grep to search tracked content.",
       "If a line-paged result reports hasMore/nextOffset, continue with the same parameters and the next offset only when more of that listing is needed.",
       "If a result is truncated by maxChars, narrow by path or switch to a summary operation; do not repeat the same call with the same parameters.",
       'If a result is "(no output)", do not repeat the same operation with the same parameters. Treat it as empty and broaden once or report no findings.',
@@ -628,7 +731,7 @@ export default function activate(pi: ExtensionAPI): void {
           type: "string",
           enum: OPERATIONS,
           description:
-            "Read-only git operation: status, diff, diff_stat, diff_shortstat, diff_name_only, diff_name_status, diff_numstat, diff_summary, diff_dirstat, log, show, branch, rev_parse, merge_base, ls_files, or root.",
+            "Read-only git operation: status, diff, diff_stat, diff_shortstat, diff_name_only, diff_name_status, diff_numstat, diff_summary, diff_dirstat, log, rev_list, show, branch, refs, grep, rev_parse, merge_base, ls_files, ls_tree, or root.",
         },
         base: {
           type: "string",
@@ -643,6 +746,12 @@ export default function activate(pi: ExtensionAPI): void {
         path: {
           type: "string",
           description: "Optional workspace-relative path filter. Absolute paths and '..' are rejected.",
+        },
+        pattern: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_PATTERN_CHARS,
+          description: "Required search pattern for operation=grep. Defaults to a fixed-string match.",
         },
         limit: {
           type: "integer",
@@ -674,6 +783,12 @@ export default function activate(pi: ExtensionAPI): void {
           type: "string",
           description:
             "Optional Git diff-filter letters for diff operations, such as A, D, M, R, AM, or ACMRT. Use to narrow large comparisons.",
+        },
+        grepMode: {
+          type: "string",
+          enum: ["fixed", "regex"],
+          description:
+            "How operation=grep interprets pattern. fixed is the default. regex uses Git extended regular expressions.",
         },
       },
     },

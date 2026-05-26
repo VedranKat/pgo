@@ -42,8 +42,17 @@ diff_name_status
 diff_numstat
 ```
 
+For repository discovery without shelling out, use:
+
+```text
+rev_list   page commit hashes and parent topology
+refs       list local branches, tags, and remote-tracking refs without remote URLs
+grep       search tracked content; fixed-string by default, regex only when requested
+ls_tree    list tracked tree entries at a ref, optionally narrowed by path
+```
+
 Diff operations enable rename detection so refactors are reported as renames when Git can infer them.
 
-Line-oriented operations support `offset` pagination. If a result reports `hasMore` and `nextOffset`, continue with the same parameters and the next offset only when more of that listing is needed. If a result is truncated by `maxChars`, narrow with `path` or switch to a summary operation rather than repeating the same call.
+Line-oriented operations support `offset` pagination. If a result reports `hasMore` and `nextOffset`, continue with the same parameters and the next offset only when more of that listing is needed. If a result is truncated by `maxChars`, narrow with `path`, `pattern`, or a summary operation rather than repeating the same call.
 
 Use `comparison=direct` for exact release/tag-to-ref comparisons and the default `comparison=merge-base` for branch review.
