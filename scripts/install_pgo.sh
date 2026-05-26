@@ -139,7 +139,25 @@ config_dir="$(dirname "$config_path")"
 mkdir -p "$config_dir"
 
 if [[ -f "$config_path" && "$force_config" -eq 0 ]]; then
-  config_status="left existing config unchanged"
+  tmp_config="$(mktemp "${config_path}.XXXXXX")"
+  awk -v runner_config="$runner_config" '
+    /^[[:space:]]*runner[[:space:]]*=/ {
+      if (!updated) {
+        print "runner = " runner_config
+        updated = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!updated) {
+        print ""
+        print "runner = " runner_config
+      }
+    }
+  ' "$config_path" > "$tmp_config"
+  mv "$tmp_config" "$config_path"
+  config_status="updated runner in existing config; preserved provider and project entries"
 else
   cat > "$config_path" <<EOF
 # pgo local project config

@@ -72,3 +72,5 @@ pgo config
 ```
 
 Shows the config path, runner, provider/model, Keychain item status, and projects. It never prints the API key.
+
+If you move the pgo clone, rerun `scripts/install_pgo.sh` from the new location.

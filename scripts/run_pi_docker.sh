@@ -289,8 +289,8 @@ fi
 if [[ "$readonly_container" -eq 1 ]]; then
   docker_args+=(
     --read-only
-    --tmpfs /tmp:rw,nosuid,nodev,size=64m
-    --tmpfs /home/node/.cache:rw,nosuid,nodev,size=64m
+    --tmpfs /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    --tmpfs /home/node/.cache:rw,nosuid,nodev,size=64m,mode=1777
   )
 fi
 
@@ -302,7 +302,7 @@ if [[ -n "$pi_home" ]]; then
   pi_home="$(cd "$pi_home" && pwd)"
   docker_args+=(-v "$pi_home:/home/node/.pi:rw")
 elif [[ "$readonly_container" -eq 1 ]]; then
-  docker_args+=(--tmpfs /home/node/.pi:rw,nosuid,nodev,exec,size=64m)
+  docker_args+=(--tmpfs /home/node/.pi:rw,nosuid,nodev,exec,size=64m,mode=1777)
 fi
 
 if [[ "$model_config_requested" -eq 1 ]]; then

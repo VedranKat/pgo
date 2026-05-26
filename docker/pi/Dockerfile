@@ -6,14 +6,19 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
+    fd-find \
+    ripgrep \
     git \
+  && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 COPY docker/pi/extensions/read-only-git.ts /opt/pi/extensions/read-only-git.ts
 COPY docker/pi/entrypoint.sh /usr/local/bin/pgo-docker-entrypoint
-RUN chmod +x /usr/local/bin/pgo-docker-entrypoint
+RUN mkdir -p /home/node/.pi/agent /home/node/.cache \
+  && chown -R node:node /home/node/.pi /home/node/.cache \
+  && chmod +x /usr/local/bin/pgo-docker-entrypoint
 
 USER node
 ENV HOME=/home/node
