@@ -47,9 +47,13 @@ your-project/
   .pgo/
     skills/
       review.md
+  .agents/
+    skills/
+      review/
+        SKILL.md
 ```
 
-If `.pgo/skills` exists, pgo loads it on every run. No Docker rebuild needed.
+If `.pgo/skills` or `.agents/skills` exists, pgo loads it on every run. For `.agents/skills`, pgo loads directories that contain `SKILL.md`. No Docker rebuild needed. When the same skill name exists in both places, `.pgo/skills` wins because it is loaded first.
 
 Disable project skills for one run:
 

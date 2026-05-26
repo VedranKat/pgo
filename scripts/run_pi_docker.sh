@@ -8,7 +8,7 @@ Usage: scripts/run_pi_docker.sh [options] [workspace] [-- pi args...]
 Run Pi inside Docker with exactly one mounted workspace.
 The workspace defaults to the current directory and is mounted read-only.
 By default Pi starts with read, grep, find, ls, and read_only_git only.
-Project skills in .pgo/skills are loaded automatically when present.
+Project skills in .pgo/skills and .agents/skills are loaded automatically when present.
 The container root filesystem is read-only by default; Pi gets tmpfs scratch space.
 
 Options:
@@ -17,11 +17,12 @@ Options:
   --write                Mount workspace read-write instead of read-only
   --writable-container   Allow writes to the container filesystem
   --offline              Disable container networking
+  --dry-run              Print the Docker command without running it
   --shell                Start bash inside the container instead of Pi; with --, run that command
   --pi-home PATH         Mount a host Pi config directory at /home/node/.pi
   --keep-session         Allow Pi to write session files in the container home
   --tools LIST           Pi tool allowlist (default: read,grep,find,ls,read_only_git)
-  --no-project-skills    Do not load workspace .pgo/skills
+  --no-project-skills    Do not load workspace .pgo/skills or .agents/skills
   --no-read-only-git     Do not load the baked-in read_only_git tool
   --no-safety-flags      Do not add --no-extensions/--no-skills/etc.
   --base-url URL         OpenAI-compatible base URL for generated Pi provider
@@ -77,6 +78,7 @@ readonly_container=1
 workspace=""
 pi_home=""
 start_shell=0
+dry_run=0
 safety_flags=1
 keep_session=0
 load_readonly_git=1
@@ -111,6 +113,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --offline)
       network_args=(--network none)
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
       shift
       ;;
     --shell)
@@ -196,27 +202,31 @@ if [[ ! -d "$workspace" ]]; then
 fi
 workspace="$(cd "$workspace" && pwd)"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is not available on PATH." >&2
-  exit 69
-fi
+if [[ "$dry_run" -eq 0 ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is not available on PATH." >&2
+    exit 69
+  fi
 
-if ! docker info >/dev/null 2>&1; then
-  cat >&2 <<'EOF'
+  if ! docker info >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
 Docker is installed, but the Docker daemon is not reachable.
 Start Docker Desktop, then run this command again.
 EOF
-  exit 69
-fi
+    exit 69
+  fi
 
-resolved_image="$(resolve_image_ref "$image" || true)"
-if [[ -z "$resolved_image" ]]; then
-  cat >&2 <<EOF
+  resolved_image="$(resolve_image_ref "$image" || true)"
+  if [[ -z "$resolved_image" ]]; then
+    cat >&2 <<EOF
 Docker image '$image' was not found.
 Build it first with:
   scripts/build_pi_docker.sh --image "$image"
 EOF
-  exit 69
+    exit 69
+  fi
+else
+  resolved_image="$image"
 fi
 
 if [[ "${#extensions[@]}" -gt 0 ]]; then
@@ -345,8 +355,15 @@ else
   if [[ "$safety_flags" -eq 1 ]]; then
     command+=(--no-extensions --no-skills --no-prompt-templates --no-context-files)
   fi
-  if [[ "$load_project_skills" -eq 1 && -d "$workspace/.pgo/skills" ]]; then
-    command+=(--skill .pgo/skills)
+  if [[ "$load_project_skills" -eq 1 ]]; then
+    if [[ -d "$workspace/.pgo/skills" ]]; then
+      command+=(--skill .pgo/skills)
+    fi
+    if [[ -d "$workspace/.agents/skills" ]]; then
+      while IFS= read -r skill_file; do
+        command+=(--skill "${skill_file#"$workspace"/}")
+      done < <(find "$workspace/.agents/skills" -name SKILL.md -type f -print | sort)
+    fi
   fi
   if [[ -n "$tool_allowlist" ]]; then
     command+=(--tools "$tool_allowlist")
@@ -365,6 +382,13 @@ else
   if [[ "${#pi_args[@]}" -gt 0 ]]; then
     command+=("${pi_args[@]}")
   fi
+fi
+
+if [[ "$dry_run" -eq 1 ]]; then
+  printf 'docker'
+  printf ' %q' "${docker_args[@]}" "$resolved_image" "${command[@]}"
+  printf '\n'
+  exit 0
 fi
 
 exec docker "${docker_args[@]}" "$resolved_image" "${command[@]}"

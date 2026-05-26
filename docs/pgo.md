@@ -93,16 +93,20 @@ The installer does not add any default projects. Run `scripts/add_pgo_project.sh
 
 ## Project Skills
 
-pgo loads workspace skills from `.pgo/skills` when that directory exists:
+pgo loads workspace skills from `.pgo/skills` and `.agents/skills` when either directory exists:
 
 ```text
 your-project/
   .pgo/
     skills/
       review.md
+  .agents/
+    skills/
+      review/
+        SKILL.md
 ```
 
-The skills live in the project on your Mac and are mounted read-only into Docker with the workspace. Global Pi skill discovery remains disabled, so pgo does not load unrelated host skills. Use `--no-project-skills` to disable project skills for a run.
+The skills live in the project on your Mac and are mounted read-only into Docker with the workspace. For `.agents/skills`, pgo loads directories that contain `SKILL.md`. Global Pi skill discovery remains disabled, so pgo does not load unrelated host skills. If both directories define the same skill name, `.pgo/skills` takes precedence because pgo passes it to Pi first. Use `--no-project-skills` to disable both project skill directories for a run.
 
 ## Use
 
