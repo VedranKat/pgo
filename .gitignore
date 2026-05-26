@@ -18,4 +18,7 @@ id_ed25519.*
 
 # Local runtime/dependency state
 .pi/
+.codex/
+AGENTS.md
+AGENTS.MD
 node_modules/
