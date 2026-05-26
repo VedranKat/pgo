@@ -219,20 +219,22 @@ EOF
   exit 69
 fi
 
-for extension in "${extensions[@]}"; do
-  case "$extension" in
-    /*)
-      echo "Use workspace-relative extension paths, not host absolute paths: $extension" >&2
-      exit 64
-      ;;
-    *)
-      if [[ ! -f "$workspace/$extension" ]]; then
-        echo "Extension does not exist in workspace: $extension" >&2
-        exit 66
-      fi
-      ;;
-  esac
-done
+if [[ "${#extensions[@]}" -gt 0 ]]; then
+  for extension in "${extensions[@]}"; do
+    case "$extension" in
+      /*)
+        echo "Use workspace-relative extension paths, not host absolute paths: $extension" >&2
+        exit 64
+        ;;
+      *)
+        if [[ ! -f "$workspace/$extension" ]]; then
+          echo "Extension does not exist in workspace: $extension" >&2
+          exit 66
+        fi
+        ;;
+    esac
+  done
+fi
 
 if [[ -n "$pi_home" && ! -d "$pi_home" ]]; then
   echo "Pi home path does not exist. Create it first if you want persistent Pi config: $pi_home" >&2
@@ -272,7 +274,6 @@ fi
 docker_args=(
   run
   --rm
-  "${network_args[@]}"
   -v "$workspace:/workspace:$mount_mode"
   -w /workspace
   -e PI_SKIP_VERSION_CHECK=1
@@ -280,6 +281,10 @@ docker_args=(
   --cap-drop ALL
   --security-opt no-new-privileges
 )
+
+if [[ "${#network_args[@]}" -gt 0 ]]; then
+  docker_args+=("${network_args[@]}")
+fi
 
 if [[ "$readonly_container" -eq 1 ]]; then
   docker_args+=(
@@ -352,10 +357,14 @@ else
   if [[ "$load_readonly_git" -eq 1 ]]; then
     command+=(-e "$readonly_git_extension")
   fi
-  for extension in "${extensions[@]}"; do
-    command+=(-e "$extension")
-  done
-  command+=("${pi_args[@]}")
+  if [[ "${#extensions[@]}" -gt 0 ]]; then
+    for extension in "${extensions[@]}"; do
+      command+=(-e "$extension")
+    done
+  fi
+  if [[ "${#pi_args[@]}" -gt 0 ]]; then
+    command+=("${pi_args[@]}")
+  fi
 fi
 
 exec docker "${docker_args[@]}" "$resolved_image" "${command[@]}"

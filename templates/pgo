@@ -281,16 +281,16 @@ api_key="$(
 
 export "$api_key_env=$api_key"
 
-pi_separator=()
+run_command=("$runner" --api-key-env "$api_key_env")
+if [[ "${#runner_args[@]}" -gt 0 ]]; then
+  run_command+=("${runner_args[@]}")
+fi
+run_command+=("$workspace")
 if [[ "${#pi_args[@]}" -gt 0 ]]; then
-  pi_separator=(--)
+  run_command+=(--)
+  run_command+=("${pi_args[@]}")
 fi
 
 PI_OPENAI_BASE_URL="$base_url" \
 PI_OPENAI_MODEL="$model" \
-"$runner" \
-  --api-key-env "$api_key_env" \
-  "${runner_args[@]}" \
-  "$workspace" \
-  "${pi_separator[@]}" \
-  "${pi_args[@]}"
+"${run_command[@]}"
