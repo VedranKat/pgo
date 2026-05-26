@@ -1,17 +1,25 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import process from "node:process";
 
 type GitOperation =
   | "status"
   | "diff"
   | "diff_stat"
+  | "diff_shortstat"
   | "diff_name_only"
+  | "diff_name_status"
+  | "diff_numstat"
+  | "diff_summary"
+  | "diff_dirstat"
   | "log"
   | "show"
   | "branch"
   | "rev_parse"
+  | "merge_base"
   | "ls_files"
   | "root";
+
+type ComparisonMode = "merge-base" | "direct";
 
 type ReadOnlyGitParams = {
   operation: GitOperation;
@@ -19,7 +27,10 @@ type ReadOnlyGitParams = {
   ref?: string;
   path?: string;
   limit?: number;
+  offset?: number;
   maxChars?: number;
+  comparison?: ComparisonMode;
+  diffFilter?: string;
 };
 
 type ToolResult = {
@@ -47,20 +58,30 @@ const OPERATIONS: GitOperation[] = [
   "status",
   "diff",
   "diff_stat",
+  "diff_shortstat",
   "diff_name_only",
+  "diff_name_status",
+  "diff_numstat",
+  "diff_summary",
+  "diff_dirstat",
   "log",
   "show",
   "branch",
   "rev_parse",
+  "merge_base",
   "ls_files",
   "root",
 ];
 
-const DEFAULT_LIMIT = 30;
-const MAX_LIMIT = 200;
+const DEFAULT_LOG_LIMIT = 30;
+const MAX_LOG_LIMIT = 200;
+const DEFAULT_PAGE_LIMIT = 200;
+const MAX_PAGE_LIMIT = 1000;
+const MAX_OFFSET = 1_000_000;
 const DEFAULT_MAX_CHARS = 20000;
 const MAX_CHARS = 100000;
 const SAFE_REVISION = /^[A-Za-z0-9._/@+~^-]+$/;
+const SAFE_DIFF_FILTER = /^[ACDMRTUXB*]+$/;
 const BASE_GIT_ARGS = [
   "-c",
   "core.pager=cat",
@@ -73,6 +94,29 @@ const BASE_GIT_ARGS = [
   "-c",
   "diff.external=",
 ];
+const BASE_DIFF_ARGS = ["diff", "--no-ext-diff", "--find-renames"];
+const LINE_PAGED_OPERATIONS = new Set<GitOperation>([
+  "status",
+  "diff_name_only",
+  "diff_name_status",
+  "diff_numstat",
+  "diff_summary",
+  "diff_dirstat",
+  "log",
+  "branch",
+  "ls_files",
+]);
+
+type BuiltGitCommand = {
+  operation: GitOperation;
+  args: string[];
+  command: string;
+  linePaged: boolean;
+  limit: number;
+  offset: number;
+  streamOffset: number;
+  maxChars: number;
+};
 
 function assertSafeRevision(name: string, value: string): string {
   const ref = value.trim();
@@ -96,7 +140,7 @@ function optionalRevision(name: string, value: string | undefined): string | und
 }
 
 function assertSafePath(value: string | undefined): string | undefined {
-  if (value === undefined || value === "") {
+  if (value === undefined) {
     return undefined;
   }
   const normalized = value.replace(/^@/, "").replace(/\\/g, "/").trim();
@@ -111,25 +155,73 @@ function assertSafePath(value: string | undefined): string | undefined {
   return normalized;
 }
 
-function boundedInt(value: number | undefined, fallback: number, max: number): number {
+function boundedInt(
+  name: string,
+  value: number | undefined,
+  fallback: number,
+  max: number,
+  min = 1,
+): number {
   if (value === undefined) {
     return fallback;
   }
-  if (!Number.isInteger(value) || value < 1 || value > max) {
-    throw new Error(`numeric option must be an integer from 1 to ${max}`);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max}`);
   }
   return value;
 }
 
-function rangeArgs(base: string | undefined, ref: string): string[] {
-  return base ? [`${base}...${ref}`] : ref === "HEAD" ? [] : [ref];
+function diffRangeArgs(
+  base: string | undefined,
+  ref: string,
+  comparison: ComparisonMode,
+): string[] {
+  if (!base) {
+    return ref === "HEAD" ? [] : [ref];
+  }
+  return [comparison === "direct" ? `${base}..${ref}` : `${base}...${ref}`];
+}
+
+function optionalComparison(value: ComparisonMode | undefined): ComparisonMode {
+  if (value === undefined) {
+    return "merge-base";
+  }
+  if (value !== "merge-base" && value !== "direct") {
+    throw new Error('comparison must be "merge-base" or "direct"');
+  }
+  return value;
+}
+
+function optionalDiffFilter(value: string | undefined): string | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  const filter = value.trim();
+  if (!SAFE_DIFF_FILTER.test(filter)) {
+    throw new Error(
+      `diffFilter is not allowed: ${value}. Use Git status letters like A, C, D, M, R, T, U, X, B, or *.`,
+    );
+  }
+  return filter;
+}
+
+function diffFilterArgs(diffFilter: string | undefined): string[] {
+  return diffFilter ? [`--diff-filter=${diffFilter}`] : [];
 }
 
 function withPath(args: string[], path: string | undefined): string[] {
   return path ? [...args, "--", path] : args;
 }
 
-function buildGitArgs(params: ReadOnlyGitParams): string[] {
+function defaultLimit(operation: GitOperation): number {
+  return operation === "log" ? DEFAULT_LOG_LIMIT : DEFAULT_PAGE_LIMIT;
+}
+
+function maxLimit(operation: GitOperation): number {
+  return operation === "log" ? MAX_LOG_LIMIT : MAX_PAGE_LIMIT;
+}
+
+function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
   if (!OPERATIONS.includes(params.operation)) {
     throw new Error(`Unsupported read_only_git operation: ${params.operation}`);
   }
@@ -137,38 +229,142 @@ function buildGitArgs(params: ReadOnlyGitParams): string[] {
   const base = optionalRevision("base", params.base);
   const ref = optionalRevision("ref", params.ref) ?? "HEAD";
   const path = assertSafePath(params.path);
-  const limit = boundedInt(params.limit, DEFAULT_LIMIT, MAX_LIMIT);
+  const limit = boundedInt(
+    "limit",
+    params.limit,
+    defaultLimit(params.operation),
+    maxLimit(params.operation),
+  );
+  const offset = boundedInt("offset", params.offset, 0, MAX_OFFSET, 0);
+  const maxChars = boundedInt("maxChars", params.maxChars, DEFAULT_MAX_CHARS, MAX_CHARS);
+  const comparison = optionalComparison(params.comparison);
+  const diffFilter = optionalDiffFilter(params.diffFilter);
+  const linePaged = LINE_PAGED_OPERATIONS.has(params.operation);
+  const pageProbeLimit = linePaged ? limit + 1 : limit;
+  const streamOffset = params.operation === "log" ? 0 : offset;
+  const range = diffRangeArgs(base, ref, comparison);
+  let gitArgs: string[];
 
   switch (params.operation) {
     case "status":
-      return withPath(["status", "--short", "--branch"], path);
+      gitArgs = withPath(["status", "--short", "--branch"], path);
+      break;
     case "diff":
-      return withPath(["diff", "--no-ext-diff", "--no-textconv", ...rangeArgs(base, ref)], path);
-    case "diff_stat":
-      return withPath(["diff", "--no-ext-diff", "--stat", ...rangeArgs(base, ref)], path);
-    case "diff_name_only":
-      return withPath(["diff", "--no-ext-diff", "--name-only", ...rangeArgs(base, ref)], path);
-    case "log":
-      return withPath(
-        base
-          ? ["log", "--oneline", "--decorate", "--max-count", String(limit), `${base}..${ref}`]
-          : ["log", "--oneline", "--decorate", "--max-count", String(limit)],
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--no-textconv", ...diffFilterArgs(diffFilter), ...range],
         path,
       );
+      break;
+    case "diff_stat":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--stat", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_shortstat":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--shortstat", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_name_only":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--name-only", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_name_status":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--name-status", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_numstat":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--numstat", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_summary":
+      gitArgs = withPath(
+        [...BASE_DIFF_ARGS, "--summary", ...diffFilterArgs(diffFilter), ...range],
+        path,
+      );
+      break;
+    case "diff_dirstat":
+      gitArgs = withPath(
+        [
+          ...BASE_DIFF_ARGS,
+          "--dirstat=files,10,cumulative",
+          ...diffFilterArgs(diffFilter),
+          ...range,
+        ],
+        path,
+      );
+      break;
+    case "log":
+      gitArgs = withPath(
+        base
+          ? [
+              "log",
+              "--oneline",
+              "--decorate",
+              "--skip",
+              String(offset),
+              "--max-count",
+              String(pageProbeLimit),
+              `${base}..${ref}`,
+            ]
+          : [
+              "log",
+              "--oneline",
+              "--decorate",
+              "--skip",
+              String(offset),
+              "--max-count",
+              String(pageProbeLimit),
+              ...(ref === "HEAD" ? [] : [ref]),
+            ],
+        path,
+      );
+      break;
     case "show":
-      return withPath(
+      gitArgs = withPath(
         ["show", "--no-ext-diff", "--no-textconv", "--stat", "--oneline", "--decorate", ref],
         path,
       );
+      break;
     case "branch":
-      return ["branch", "--all", "--no-color"];
+      gitArgs = ["branch", "--all", "--no-color"];
+      break;
     case "rev_parse":
-      return ["rev-parse", "--short", ref];
+      gitArgs = ["rev-parse", "--short", ref];
+      break;
+    case "merge_base":
+      if (!base) {
+        throw new Error("base is required for operation=merge_base");
+      }
+      gitArgs = ["merge-base", base, ref];
+      break;
     case "ls_files":
-      return withPath(["ls-files"], path);
+      gitArgs = withPath(["ls-files"], path);
+      break;
     case "root":
-      return ["rev-parse", "--show-toplevel"];
+      gitArgs = ["rev-parse", "--show-toplevel"];
+      break;
   }
+
+  const args = [...BASE_GIT_ARGS, ...gitArgs];
+  return {
+    operation: params.operation,
+    args,
+    command: ["git", ...args].join(" "),
+    linePaged,
+    limit,
+    offset,
+    streamOffset,
+    maxChars,
+  };
 }
 
 function truncate(text: string, maxChars: number): { text: string; truncated: boolean; originalChars: number } {
@@ -182,52 +378,226 @@ function truncate(text: string, maxChars: number): { text: string; truncated: bo
   };
 }
 
-function runGit(params: ReadOnlyGitParams, signal?: AbortSignal): ToolResult {
+function runProcess(
+  args: string[],
+  signal: AbortSignal | undefined,
+  onStdout: (chunk: string, stop: () => void) => void,
+  onStderr: (chunk: string, stop: () => void) => void,
+): Promise<{
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  stoppedEarly: boolean;
+  timedOut: boolean;
+  cancelled: boolean;
+}> {
+  return new Promise((resolve, reject) => {
+    let stoppedEarly = false;
+    let timedOut = false;
+    let cancelled = false;
+    let stderr = "";
+    let settled = false;
+
+    const child = spawn("git", args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        GIT_ASKPASS: "/bin/false",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_EXTERNAL_DIFF: "",
+        GIT_PAGER: "cat",
+        GIT_TERMINAL_PROMPT: "0",
+        SSH_ASKPASS: "/bin/false",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const stop = () => {
+      stoppedEarly = true;
+      child.kill("SIGTERM");
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, 15000);
+    const abort = () => {
+      cancelled = true;
+      child.kill("SIGTERM");
+    };
+
+    signal?.addEventListener("abort", abort, { once: true });
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => onStdout(chunk, stop));
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+      onStderr(chunk, stop);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      if (!settled) {
+        settled = true;
+        reject(new Error(`git failed to start: ${error.message}`));
+      }
+    });
+    child.on("close", (status, exitSignal) => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      if (!settled) {
+        settled = true;
+        resolve({ status, signal: exitSignal, stderr, stoppedEarly, timedOut, cancelled });
+      }
+    });
+  });
+}
+
+async function runGitText(command: BuiltGitCommand, signal?: AbortSignal): Promise<ToolResult> {
+  let output = "";
+  let seenChars = 0;
+  let truncatedByChars = false;
+
+  const result = await runProcess(
+    command.args,
+    signal,
+    (chunk, stop) => {
+      seenChars += chunk.length;
+      if (output.length < command.maxChars) {
+        output += chunk.slice(0, command.maxChars - output.length);
+      }
+      if (seenChars > command.maxChars && !truncatedByChars) {
+        truncatedByChars = true;
+        stop();
+      }
+    },
+    (chunk, stop) => {
+      seenChars += chunk.length;
+      if (output.length < command.maxChars) {
+        output += chunk.slice(0, command.maxChars - output.length);
+      }
+      if (seenChars > command.maxChars && !truncatedByChars) {
+        truncatedByChars = true;
+        stop();
+      }
+    },
+  );
+
+  if (result.cancelled) {
+    throw new Error("read_only_git cancelled");
+  }
+  if (result.timedOut) {
+    throw new Error("git timed out after 15s");
+  }
+  if (!truncatedByChars && result.status !== 0) {
+    throw new Error(output.trim() || result.stderr.trim() || `git exited with status ${result.status}`);
+  }
+
+  const rendered = output.trim() || "(no output)";
+  const truncated = truncate(rendered, command.maxChars);
+  const text = truncatedByChars
+    ? `${truncated.text}\n\n[read_only_git output truncated at ${command.maxChars} characters]`
+    : truncated.text;
+
+  return {
+    content: [{ type: "text", text: `$ ${command.command}\n${text}` }],
+    details: {
+      command: command.command,
+      operation: command.operation,
+      truncated: truncated.truncated || truncatedByChars,
+      originalChars: truncatedByChars ? `>${command.maxChars}` : truncated.originalChars,
+    },
+  };
+}
+
+async function runGitLines(command: BuiltGitCommand, signal?: AbortSignal): Promise<ToolResult> {
+  const lines: string[] = [];
+  let pending = "";
+  let lineIndex = 0;
+  let hasMore = false;
+
+  const pushLine = (line: string, stop: () => void) => {
+    if (lineIndex >= command.streamOffset + command.limit) {
+      hasMore = true;
+      stop();
+      return;
+    }
+    if (lineIndex >= command.streamOffset) {
+      lines.push(line);
+    }
+    lineIndex += 1;
+  };
+
+  const result = await runProcess(
+    command.args,
+    signal,
+    (chunk, stop) => {
+      pending += chunk;
+      let newlineIndex = pending.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = pending.slice(0, newlineIndex).replace(/\r$/, "");
+        pending = pending.slice(newlineIndex + 1);
+        pushLine(line, stop);
+        if (hasMore) {
+          return;
+        }
+        newlineIndex = pending.indexOf("\n");
+      }
+    },
+    () => {},
+  );
+
+  if (!hasMore && pending.length > 0) {
+    pushLine(pending.replace(/\r$/, ""), () => {});
+    pending = "";
+  }
+
+  if (result.cancelled) {
+    throw new Error("read_only_git cancelled");
+  }
+  if (result.timedOut) {
+    throw new Error("git timed out after 15s");
+  }
+  if (!hasMore && result.status !== 0) {
+    throw new Error(result.stderr.trim() || `git exited with status ${result.status}`);
+  }
+
+  const rendered = lines.length > 0 ? lines.join("\n") : "(no output)";
+  const truncated = truncate(rendered, command.maxChars);
+  const nextOffset = command.offset + command.limit;
+  const pageNote = hasMore
+    ? `\n\n[read_only_git has more lines; call again with offset=${nextOffset} to continue this page sequence]`
+    : "";
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: `$ ${command.command}\n${truncated.text}${pageNote}`,
+      },
+    ],
+    details: {
+      command: command.command,
+      operation: command.operation,
+      truncated: truncated.truncated,
+      originalChars: truncated.originalChars,
+      offset: command.offset,
+      limit: command.limit,
+      nextOffset: hasMore ? nextOffset : undefined,
+      hasMore,
+      linesReturned: lines.length,
+    },
+  };
+}
+
+async function runGit(params: ReadOnlyGitParams, signal?: AbortSignal): Promise<ToolResult> {
   if (signal?.aborted) {
     throw new Error("read_only_git cancelled");
   }
 
-  const maxChars = boundedInt(params.maxChars, DEFAULT_MAX_CHARS, MAX_CHARS);
-  const gitArgs = buildGitArgs(params);
-  const args = [...BASE_GIT_ARGS, ...gitArgs];
-  const result = spawnSync("git", args, {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      GIT_ASKPASS: "/bin/false",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_EXTERNAL_DIFF: "",
-      GIT_PAGER: "cat",
-      GIT_TERMINAL_PROMPT: "0",
-      SSH_ASKPASS: "/bin/false",
-    },
-    maxBuffer: Math.max(maxChars * 2, 1024 * 1024),
-    timeout: 15000,
-  });
-
-  if (result.error) {
-    throw new Error(`git failed to start: ${result.error.message}`);
-  }
-
-  const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-  if (result.status !== 0) {
-    throw new Error(output || `git exited with status ${result.status}`);
-  }
-
-  const rendered = output || "(no output)";
-  const truncated = truncate(rendered, maxChars);
-  const command = ["git", ...args].join(" ");
-  return {
-    content: [{ type: "text", text: `$ ${command}\n${truncated.text}` }],
-    details: {
-      command,
-      operation: params.operation,
-      truncated: truncated.truncated,
-      originalChars: truncated.originalChars,
-    },
-  };
+  const command = buildGitCommand(params);
+  return command.linePaged ? runGitLines(command, signal) : runGitText(command, signal);
 }
 
 export default function activate(pi: ExtensionAPI): void {
@@ -242,6 +612,11 @@ export default function activate(pi: ExtensionAPI): void {
       "Use read_only_git with operation=status before drawing conclusions about uncommitted work.",
       "A git ref is a branch, tag, commit, or revision expression. Use HEAD for the current branch.",
       "For branch comparisons, pass base and ref separately, for example base=main and ref=HEAD. Do not pass main...HEAD as one value.",
+      "For large comparisons, start with diff_shortstat, diff_dirstat, diff_name_status, or diff_numstat before requesting full diff output.",
+      "If a line-paged result reports hasMore/nextOffset, continue with the same parameters and the next offset only when more of that listing is needed.",
+      "If a result is truncated by maxChars, narrow by path or switch to a summary operation; do not repeat the same call with the same parameters.",
+      'If a result is "(no output)", do not repeat the same operation with the same parameters. Treat it as empty and broaden once or report no findings.',
+      'Use comparison="direct" for exact release/tag-to-ref comparisons; use the default comparison="merge-base" for branch review.',
       "Prefer small read_only_git calls, then inspect specific files with read/grep/find/ls as needed.",
     ],
     parameters: {
@@ -253,7 +628,7 @@ export default function activate(pi: ExtensionAPI): void {
           type: "string",
           enum: OPERATIONS,
           description:
-            "Read-only git operation: status, diff, diff_stat, diff_name_only, log, show, branch, rev_parse, ls_files, or root.",
+            "Read-only git operation: status, diff, diff_stat, diff_shortstat, diff_name_only, diff_name_status, diff_numstat, diff_summary, diff_dirstat, log, show, branch, rev_parse, merge_base, ls_files, or root.",
         },
         base: {
           type: "string",
@@ -272,14 +647,33 @@ export default function activate(pi: ExtensionAPI): void {
         limit: {
           type: "integer",
           minimum: 1,
-          maximum: MAX_LIMIT,
-          description: "Maximum commits for operation=log. Default: 30.",
+          maximum: MAX_PAGE_LIMIT,
+          description:
+            "Maximum rows for line-paged operations, or commits for operation=log. Defaults: log=30, line pages=200. Max: log=200, line pages=1000.",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          maximum: MAX_OFFSET,
+          description:
+            "Zero-based row offset for line-paged operations. Use details.nextOffset when hasMore is true; do not repeat the same offset.",
         },
         maxChars: {
           type: "integer",
           minimum: 1,
           maximum: MAX_CHARS,
           description: "Maximum returned output characters. Default: 20000.",
+        },
+        comparison: {
+          type: "string",
+          enum: ["merge-base", "direct"],
+          description:
+            "How diff operations compare base and ref. merge-base uses base...ref for branch review. direct uses base..ref for exact release/tag comparisons.",
+        },
+        diffFilter: {
+          type: "string",
+          description:
+            "Optional Git diff-filter letters for diff operations, such as A, D, M, R, AM, or ACMRT. Use to narrow large comparisons.",
         },
       },
     },
