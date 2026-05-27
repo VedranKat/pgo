@@ -122,6 +122,16 @@ const LINE_PAGED_OPERATIONS = new Set<GitOperation>([
   "ls_files",
   "ls_tree",
 ]);
+const DIFF_OPERATIONS = new Set<GitOperation>([
+  "diff",
+  "diff_stat",
+  "diff_shortstat",
+  "diff_name_only",
+  "diff_name_status",
+  "diff_numstat",
+  "diff_summary",
+  "diff_dirstat",
+]);
 
 type BuiltGitCommand = {
   operation: GitOperation;
@@ -264,7 +274,8 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
   }
 
   const base = optionalRevision("base", params.base);
-  const explicitRef = optionalRevision("ref", params.ref);
+  const rawRef = params.operation === "rev_parse" && params.ref === undefined ? params.pattern : params.ref;
+  const explicitRef = optionalRevision("ref", rawRef);
   const ref = explicitRef ?? "HEAD";
   const path = assertSafePath(params.path);
   const limit = boundedInt(
@@ -277,6 +288,12 @@ function buildGitCommand(params: ReadOnlyGitParams): BuiltGitCommand {
   const maxChars = boundedInt("maxChars", params.maxChars, DEFAULT_MAX_CHARS, MAX_CHARS);
   const comparison = optionalComparison(params.comparison);
   const diffFilter = optionalDiffFilter(params.diffFilter);
+  if (params.comparison !== undefined && !base && DIFF_OPERATIONS.has(params.operation)) {
+    throw new Error(
+      "base is required when comparison is set for a diff operation. " +
+        "Use base=main and ref=HEAD for branch history, or omit comparison for a working-tree diff.",
+    );
+  }
   const linePaged = LINE_PAGED_OPERATIONS.has(params.operation);
   const pageProbeLimit = linePaged ? limit + 1 : limit;
   const streamOffset = params.operation === "log" || params.operation === "rev_list" ? 0 : offset;
@@ -668,6 +685,19 @@ async function runGitLines(command: BuiltGitCommand, signal?: AbortSignal): Prom
   const rendered = lines.length > 0 ? lines.join("\n") : "(no output)";
   const truncated = truncate(rendered, command.maxChars);
   const nextOffset = command.offset + command.limit;
+  const metadata = [
+    `operation=${command.operation}`,
+    `linesReturned=${lines.length}`,
+    `hasMore=${hasMore}`,
+    hasMore ? `nextOffset=${nextOffset}` : "",
+    `truncated=${truncated.truncated}`,
+  ]
+    .filter(Boolean)
+    .join("; ");
+  const operationNote =
+    command.operation === "rev_list"
+      ? "\n[read_only_git note: rev_list output has one commit per output line; the first hash is the commit and later hashes are parent commits. Use linesReturned or count output lines for commit counts.]"
+      : "";
   const pageNote = hasMore
     ? `\n\n[read_only_git has more lines; call again with offset=${nextOffset} to continue this page sequence]`
     : "";
@@ -676,7 +706,7 @@ async function runGitLines(command: BuiltGitCommand, signal?: AbortSignal): Prom
     content: [
       {
         type: "text",
-        text: `$ ${command.command}\n${truncated.text}${pageNote}`,
+        text: `$ ${command.command}\n[read_only_git metadata: ${metadata}]${operationNote}\n${truncated.text}${pageNote}`,
       },
     ],
     details: {
@@ -711,16 +741,35 @@ export default function activate(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use read_only_git instead of bash for git inspection.",
       "read_only_git is read-only; do not ask it to mutate refs, files, remotes, index, or working tree.",
-      "Use read_only_git with operation=status before drawing conclusions about uncommitted work.",
+      "Use read_only_git with operation=status before drawing conclusions about explicitly local, dirty, uncommitted, or working-tree work.",
       "A git ref is a branch, tag, commit, or revision expression. Use HEAD for the current branch.",
       "For branch comparisons, pass base and ref separately, for example base=main and ref=HEAD. Do not pass main...HEAD as one value.",
+      "Diff operations without base compare the working tree, not branch history. For branch history or ref-to-ref comparison, always include base and ref.",
+      "The words 'differ between', 'different between', or 'compare A and B' usually mean a direct tree comparison between the two refs. Use comparison=direct for that unless the user specifically asks for branch review or changes since the merge base.",
+      "When a user asks what changed on this branch, whether a file changed on this branch, or whether there are renames on this branch, inspect committed branch history against the merge base, usually base=main and ref=HEAD. Do not answer these branch-history questions from status or a bare working-tree diff unless the user asks about local/uncommitted work.",
+      "For branch-specific changes since divergence, use comparison=merge-base with base=<destination> and ref=<source>. Example: what main would get by merging this branch is base=main, ref=HEAD. What is on main but not this branch is base=HEAD, ref=main.",
+      "Use comparison=direct for exact release/tag/ref-to-ref tree comparisons and for symmetric questions like which files differ between branch A and branch B. Direct branch-to-branch diffs can show deletions for files that exist only on the opposite side.",
+      "For questions about files or commits unique to a branch, compare that branch against the other branch as base=<other> and ref=<branch>. For the opposite direction, swap base and ref.",
+      "When the user asks what changed on another branch, treat changed as changed files or a file summary unless they specifically ask only for commits. Use diff_name_status, diff, or show to inspect the changed files, not only rev_list or log.",
+      "Use ls_files to list files tracked in the current checkout. Use ls_tree with ref=<branch-or-tag> to check whether a file exists on another branch, tag, or historical ref.",
+      "The path parameter is a repository-relative path: the exact path from the Git repository root, such as src/app.ts or config/application.properties. It is not an absolute path, not a path relative to an arbitrary current directory, and not a basename search.",
+      "A bare filename such as application.properties is not a repository-relative path unless the file is tracked at the repository root as exactly application.properties.",
+      "When the user gives only a filename or partial path, first locate the tracked file with read_only_git operation=ls_files. Call ls_files without path to list tracked files, then match the basename or suffix. If needed, use read_only_git operation=grep to search tracked contents. Do not use generic ls, find, grep, or shell commands for this Git lookup.",
+      "After resolving the tracked path, use that exact repository-relative path in diff/log/show calls. Example: resolve application.properties to config/application.properties, then call diff_name_status or diff with path=config/application.properties.",
+      "For questions like 'did FILE change between A and B', first ensure FILE is a resolved repository-relative path. Then use diff_name_status or diff with base=A, ref=B, and path=FILE.",
+      'If a path-scoped diff returns "(no output)" for a resolved repository-relative path, answer that the file did not change for that comparison. If the path was only a bare filename or partial path, do not conclude no change; resolve the tracked path first.',
       "For large comparisons, start with diff_shortstat, diff_dirstat, diff_name_status, or diff_numstat before requesting full diff output.",
+      "For file-level churn questions like which file changed most, use diff_numstat, optionally with path=<directory>. diff_dirstat answers directory-level hotspots, not the largest file.",
       "Use rev_list to page commit topology, refs to list local refs, ls_tree to inspect tracked tree contents at a ref, and grep to search tracked content.",
+      "For ahead/behind commit counts, use rev_list with base=<other> and ref=<branch>. rev_list prints one commit per output line; count output lines or use linesReturned. Parent hashes after the first hash are not additional commits.",
+      "To decide whether a branch diverged from main, check both directions: base=main ref=HEAD and base=HEAD ref=main. If both directions have commits, it diverged; if only one direction has commits, it is ahead or behind.",
+      "When the user asks what commits are present or wants commit subjects, prefer log. rev_list is for counting or topology and prints hashes, not human-readable subjects.",
+      "Do not repeat an identical successful read_only_git call. If the output is complete, use it; if it does not answer the question, choose a different operation or parameters.",
       "If a line-paged result reports hasMore/nextOffset, continue with the same parameters and the next offset only when more of that listing is needed.",
       "If a result is truncated by maxChars, narrow by path or switch to a summary operation; do not repeat the same call with the same parameters.",
       'If a result is "(no output)", do not repeat the same operation with the same parameters. Treat it as empty and broaden once or report no findings.',
       'Use comparison="direct" for exact release/tag-to-ref comparisons; use the default comparison="merge-base" for branch review.',
-      "Prefer small read_only_git calls, then inspect specific files with read/grep/find/ls as needed.",
+      "For Git/history/version questions, use read_only_git operations first. Generic file tools may see the working tree but do not answer version comparisons.",
     ],
     parameters: {
       type: "object",
@@ -745,7 +794,8 @@ export default function activate(pi: ExtensionAPI): void {
         },
         path: {
           type: "string",
-          description: "Optional workspace-relative path filter. Absolute paths and '..' are rejected.",
+          description:
+            "Optional repository-relative path filter from the Git root, such as config/application.properties. This is not a basename search; resolve bare filenames with operation=ls_files first. Absolute paths and '..' are rejected.",
         },
         pattern: {
           type: "string",
@@ -777,7 +827,7 @@ export default function activate(pi: ExtensionAPI): void {
           type: "string",
           enum: ["merge-base", "direct"],
           description:
-            "How diff operations compare base and ref. merge-base uses base...ref for branch review. direct uses base..ref for exact release/tag comparisons.",
+            "How diff operations compare base and ref. merge-base uses base...ref for branch review and changes since divergence. direct uses base..ref for exact ref-to-ref tree comparisons, including questions like which files differ between main and feature.",
         },
         diffFilter: {
           type: "string",
